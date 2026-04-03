@@ -1,0 +1,249 @@
+openapi: 3.0.0
+info:
+  title: Render Farm API
+  description: API for managing distributed rendering jobs
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+paths:
+  /api/render/stream:
+    get:
+      summary: Stream real-time job updates
+      description: Establishes a Server-Sent Events (SSE) stream for real-time updates on job progress
+      responses:
+        200:
+          description: SSE stream of job updates
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: "event:job_update\ndata:{\"jobId\":1,\"event\":\"FRAME_COMPLETE\",\"frame\":10}\n\n"
+  /api/render/poll:
+    get:
+      summary: Poll for next available render chunk
+      description: Workers poll this endpoint to get the next available chunk to render
+      parameters:
+        - name: nodeName
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Name of the worker node requesting work
+      responses:
+        200:
+          description: Next available chunk to render
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderChunk'
+        204:
+          description: No chunks available
+  /api/render/report/{chunkId}:
+    post:
+      summary: Report chunk completion status
+      description: Workers report the status of a completed chunk
+      parameters:
+        - name: chunkId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: status
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [COMPLETED, FAILED]
+      responses:
+        200:
+          description: Status reported successfully
+  /api/render/heartbeat/{chunkId}:
+    post:
+      summary: Send worker heartbeat
+      description: Workers send periodic heartbeat to indicate they are still processing a chunk
+      parameters:
+        - name: chunkId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        200:
+          description: Heartbeat received and recorded
+  /api/render/submit-job:
+    post:
+      summary: Submit a new rendering job
+      description: Submit a new job for distributed rendering
+      parameters:
+        - name: blendFilePath
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Path to the Blender file
+        - name: totalFrames
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int32
+          description: Total number of frames to render
+        - name: command
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional executable name (e.g. blender)
+        - name: args
+          in: query
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+          description: Optional list of command arguments; supports placeholders like {file} and {frame}
+      responses:
+        200:
+          description: Job submitted successfully
+          content:
+            application/json:
+              schema:
+                type: integer
+                format: int64
+                description: Job ID
+  /api/render/upload:
+    post:
+      summary: Upload rendered frame
+      description: Workers upload completed frame images
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                jobId:
+                  type: integer
+                  format: int64
+                  description: Job ID
+                frame:
+                  type: integer
+                  format: int32
+                  description: Frame number
+                file:
+                  type: string
+                  format: binary
+                  description: Rendered frame image file
+              required:
+                - jobId
+                - frame
+                - file
+      responses:
+        200:
+          description: Frame uploaded successfully
+  /api/render/chunk-status/{chunkId}:
+    get:
+      summary: Check chunk rendering status
+      description: Check if a chunk should continue rendering or stop
+      parameters:
+        - name: chunkId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        200:
+          description: Whether to continue rendering
+          content:
+            application/json:
+              schema:
+                type: boolean
+                description: true to continue rendering, false to stop
+  /api/render/{jobId}/pause:
+    post:
+      summary: Pause a job
+      description: Pause the rendering of a job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        200:
+          description: Job paused successfully
+  /api/render/{jobId}/resume:
+    post:
+      summary: Resume a job
+      description: Resume the rendering of a paused job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        200:
+          description: Job resumed successfully
+  /api/render/{jobId}/stop:
+    post:
+      summary: Stop a job
+      description: Cancel the rendering of a job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        200:
+          description: Job stopped successfully
+components:
+  schemas:
+    RenderChunk:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        jobId:
+          type: integer
+          format: int64
+        blendFilePath:
+          type: string
+        command:
+          type: string
+        commandArgs:
+          type: array
+          items:
+            type: string
+        startFrame:
+          type: integer
+          format: int32
+        endFrame:
+          type: integer
+          format: int32
+        status:
+          type: string
+          enum: [PENDING, IN_PROGRESS, COMPLETED, FAILED]
+        assignedNode:
+          type: string
+        lastHeartbeat:
+          type: string
+          format: date-time
+      required:
+        - id
+        - jobId
+        - blendFilePath
+        - startFrame
+        - endFrame
+        - status

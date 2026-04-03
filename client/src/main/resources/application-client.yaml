@@ -1,0 +1,5 @@
+spring:
+  application:
+    name: client
+  main:
+    web-environment: false
