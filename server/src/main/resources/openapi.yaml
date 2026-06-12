@@ -75,15 +75,15 @@ paths:
           description: Heartbeat received and recorded
   /api/render/submit-job:
     post:
-      summary: Submit a new rendering job
-      description: Submit a new job for distributed rendering
+      summary: Submit a new command job
+      description: Submit a new distributed command-line job
       parameters:
-        - name: blendFilePath
+        - name: inputFilePath
           in: query
           required: true
           schema:
             type: string
-          description: Path to the Blender file
+          description: Path to the input file available to workers
         - name: totalFrames
           in: query
           required: true
@@ -93,10 +93,10 @@ paths:
           description: Total number of frames to render
         - name: command
           in: query
-          required: false
+          required: true
           schema:
             type: string
-          description: Optional executable name (e.g. blender)
+          description: Executable name or path
         - name: args
           in: query
           required: false
@@ -106,7 +106,13 @@ paths:
             type: array
             items:
               type: string
-          description: Optional list of command arguments; supports placeholders like {file} and {frame}
+          description: Optional list of command arguments; supports placeholders like {input}, {file}, {frame}, {jobId}, and {output}
+        - name: outputPath
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Worker-local output path pattern for the file to upload; supports placeholders like {frame} and {jobId}
       responses:
         200:
           description: Job submitted successfully
@@ -218,9 +224,11 @@ components:
         jobId:
           type: integer
           format: int64
-        blendFilePath:
+        inputFilePath:
           type: string
         command:
+          type: string
+        outputPath:
           type: string
         commandArgs:
           type: array
@@ -243,7 +251,7 @@ components:
       required:
         - id
         - jobId
-        - blendFilePath
+        - inputFilePath
         - startFrame
         - endFrame
         - status

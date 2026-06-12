@@ -12,10 +12,11 @@ public class RenderChunk {
     private Long id;
     private Long jobId;
 
-    private String blendFilePath;
+    private String inputFilePath;
     private int startFrame;
     private int endFrame;
     private String command;
+    private String outputPath;
     @ElementCollection
     private List<String> commandArgs = new ArrayList<>();
 
@@ -41,12 +42,12 @@ public class RenderChunk {
         this.jobId = jobId;
     }
 
-    public String getBlendFilePath() {
-        return blendFilePath;
+    public String getInputFilePath() {
+        return inputFilePath;
     }
 
-    public void setBlendFilePath(String blendFilePath) {
-        this.blendFilePath = blendFilePath;
+    public void setInputFilePath(String inputFilePath) {
+        this.inputFilePath = inputFilePath;
     }
 
     public int getStartFrame() {
@@ -95,6 +96,14 @@ public class RenderChunk {
 
     public void setCommand(String command) {
         this.command = command;
+    }
+
+    public String getOutputPath() {
+        return outputPath;
+    }
+
+    public void setOutputPath(String outputPath) {
+        this.outputPath = outputPath;
     }
 
     public List<String> getCommandArgs() {

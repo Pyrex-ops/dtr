@@ -9,7 +9,7 @@ public class RenderJob {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    private String blendFilePath;
+    private String inputFilePath;
 
     private int totalFrames;
 
@@ -23,12 +23,20 @@ public class RenderJob {
         this.id = id;
     }
 
+    public String getInputFilePath() {
+        return inputFilePath;
+    }
+
+    public void setInputFilePath(String inputFilePath) {
+        this.inputFilePath = inputFilePath;
+    }
+
     public String getBlendFilePath() {
-        return blendFilePath;
+        return inputFilePath;
     }
 
     public void setBlendFilePath(String blendFilePath) {
-        this.blendFilePath = blendFilePath;
+        this.inputFilePath = blendFilePath;
     }
 
     public int getTotalFrames() {

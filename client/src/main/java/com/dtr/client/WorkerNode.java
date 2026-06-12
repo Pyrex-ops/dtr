@@ -1,10 +1,16 @@
 package com.dtr.client;
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -22,10 +28,18 @@ import com.dtr.commonlib.RenderChunk;
 @EnableScheduling
 public class WorkerNode  implements org.springframework.boot.CommandLineRunner {
 
+    private enum RenderResult {
+        COMPLETED,
+        FAILED,
+        ABORTED
+    }
+
     private final RestTemplate restTemplate = new RestTemplate();
     private final String MASTER_URL = "http://localhost:8080/api/render";
-    private final String NODE_NAME = "Node-1";
+    private final String NODE_NAME = loadOrCreateNodeName();
     private Long currentChunkId = null; // Track the currently assigned chunk for heartbeat
+    @Value("${dtr.worker.output-path:/tmp/render_output_{jobId}_{frame}.png}")
+    private String outputPathPattern;
 
     @Override
     public void run(String... args) throws Exception {
@@ -57,11 +71,15 @@ public class WorkerNode  implements org.springframework.boot.CommandLineRunner {
             System.out.println("Polling for work...");
             if (chunk != null) {
                 System.out.println("Received chunk: Job " + chunk.getJobId() + " Frames " + chunk.getStartFrame() + "-" + chunk.getEndFrame());
-                boolean success = renderChunkFrameByFrame(chunk);
-                String status = success ? "COMPLETED" : "FAILED";
+                RenderResult result = renderChunkFrameByFrame(chunk);
+                String status = switch (result) {
+                    case COMPLETED -> "COMPLETED";
+                    case FAILED -> "FAILED";
+                    case ABORTED -> "PENDING";
+                };
                 System.out.println("Reporting chunk " + chunk.getId() + " as " + status);
                 restTemplate.postForLocation(MASTER_URL + "/report/" + chunk.getId() + "?status=" + status, null);
-                return true;
+                return result != RenderResult.ABORTED;
             }
             else{
                 return false;
@@ -73,42 +91,69 @@ public class WorkerNode  implements org.springframework.boot.CommandLineRunner {
         }
     }
 
-    private boolean renderChunkFrameByFrame(RenderChunk chunk) {
+    private RenderResult renderChunkFrameByFrame(RenderChunk chunk) {
         this.currentChunkId = chunk.getId();
-        for (int frame = chunk.getStartFrame(); frame <= chunk.getEndFrame(); frame++) {
-            
-            // 1. Check if Master paused or stopped the job
-            Boolean isActive = restTemplate.getForObject(MASTER_URL + "/chunk-status/" + chunk.getId(), Boolean.class);
-            if (!isActive) {
-                System.out.println("Job Paused/Stopped. Aborting chunk.");
-                return false; 
+        List<CompletableFuture<Boolean>> uploadFutures = new ArrayList<>();
+        try {
+            if (chunk.getCommand() == null || chunk.getCommand().isBlank()) {
+                System.err.println("Missing command for chunk " + chunk.getId());
+                return RenderResult.FAILED;
             }
-            // 2. Render single frame: use chunk-provided command/args (with placeholders)
-            List<String> command = new ArrayList<>();
-            if (chunk.getCommand() != null && !chunk.getCommand().isEmpty()) {
-                command.add(chunk.getCommand());
-                if (chunk.getCommandArgs() != null) {
-                    for (String arg : chunk.getCommandArgs()) {
-                        command.add(substitute(arg, chunk, frame));
-                    }
-                }
-            } else {
-                // fallback example: blender -b <file> -f <frame>
-                command.add("blender");
-                command.add("-b");
-                command.add(chunk.getBlendFilePath());
-                command.add("-f");
-                command.add(String.valueOf(frame));
-            }
-            boolean rendered = executeCommand(command);
-            if (!rendered) return false;
 
-            // 3. ASYNC Upload: Upload the frame in the background while the loop continues
-            final int currentFrame = frame;
-            CompletableFuture.runAsync(() -> uploadFrame(chunk.getJobId(), currentFrame));
+            for (int frame = chunk.getStartFrame(); frame <= chunk.getEndFrame(); frame++) {
+                
+                // Check if Master paused or stopped the job
+                Boolean isActive = restTemplate.getForObject(MASTER_URL + "/chunk-status/" + chunk.getId(), Boolean.class);
+                if (!Boolean.TRUE.equals(isActive)) {
+                    System.out.println("Job Paused/Stopped. Aborting chunk.");
+                    return RenderResult.ABORTED; 
+                }
+                File imageFile = resolveOutputFile(chunk, frame);
+                List<String> command = buildCommand(chunk, frame, imageFile);
+                if (!ensureParentDirectory(imageFile)) return RenderResult.FAILED;
+                boolean rendered = executeCommand(command);
+                if (!rendered) {
+                    waitForUploads(uploadFutures);
+                    return RenderResult.FAILED;
+                }
+                if (!imageFile.isFile()) {
+                    System.err.println("Command completed but output file was not found: " + imageFile.getAbsolutePath());
+                    waitForUploads(uploadFutures);
+                    return RenderResult.FAILED;
+                }
+
+                // ASYNC Upload: Upload the frame in the background while the loop continues
+                final int currentFrame = frame;
+                final File currentImageFile = imageFile;
+                uploadFutures.add(CompletableFuture.supplyAsync(() -> uploadFrame(chunk.getJobId(), currentFrame, currentImageFile)));
+            }
+            return waitForUploads(uploadFutures) ? RenderResult.COMPLETED : RenderResult.FAILED;
+        } finally {
+            this.currentChunkId = null;
         }
-        this.currentChunkId = null;
-        return true;
+    }
+
+    private List<String> buildCommand(RenderChunk chunk, int frame, File outputFile) {
+        List<String> command = new ArrayList<>();
+        command.add(chunk.getCommand());
+        if (chunk.getCommandArgs() != null) {
+            for (String arg : chunk.getCommandArgs()) {
+                command.add(substitute(arg, chunk, frame, outputFile));
+            }
+        }
+        return command;
+    }
+
+    private boolean waitForUploads(List<CompletableFuture<Boolean>> uploadFutures) {
+        boolean allUploaded = true;
+        for (CompletableFuture<Boolean> uploadFuture : uploadFutures) {
+            try {
+                allUploaded &= Boolean.TRUE.equals(uploadFuture.join());
+            } catch (Exception e) {
+                allUploaded = false;
+            }
+        }
+        return allUploaded;
     }
 
     private boolean executeCommand(List<String> command) {
@@ -121,18 +166,83 @@ public class WorkerNode  implements org.springframework.boot.CommandLineRunner {
         }
     }
 
-    private String substitute(String token, RenderChunk chunk, int frame) {
+    private String loadOrCreateNodeName() {
+        Path nodeNamePath = Path.of(System.getProperty("user.home"), ".dtr", "worker-node-name");
+        try {
+            if (Files.exists(nodeNamePath)) {
+                String nodeName = Files.readString(nodeNamePath, StandardCharsets.UTF_8).trim();
+                if (!nodeName.isEmpty()) return nodeName;
+            }
+
+            Files.createDirectories(nodeNamePath.getParent());
+            String nodeName = "Node-" + UUID.randomUUID();
+            Files.writeString(nodeNamePath, nodeName, StandardCharsets.UTF_8);
+            return nodeName;
+        } catch (IOException e) {
+            return "Node-" + UUID.randomUUID();
+        }
+    }
+
+    private String substitute(String token, RenderChunk chunk, int frame, File outputFile) {
         if (token == null) return null;
-        String res = token.replace("{file}", chunk.getBlendFilePath() == null ? "" : chunk.getBlendFilePath())
+        String res = token.replace("{file}", chunk.getInputFilePath() == null ? "" : chunk.getInputFilePath())
+                          .replace("{input}", chunk.getInputFilePath() == null ? "" : chunk.getInputFilePath())
+                          .replace("{inputFile}", chunk.getInputFilePath() == null ? "" : chunk.getInputFilePath())
+                          .replace("{output}", outputFile.getAbsolutePath())
                           .replace("{frame}", String.valueOf(frame))
                           .replace("{jobId}", chunk.getJobId() == null ? "" : String.valueOf(chunk.getJobId()));
         return res;
     }
 
-    private void uploadFrame(Long jobId, int frame) {
+    private File resolveOutputFile(RenderChunk chunk, int frame) {
+        boolean hasExplicitOutputPath = chunk.getOutputPath() != null && !chunk.getOutputPath().isBlank();
+        String outputPath = hasExplicitOutputPath ? chunk.getOutputPath() : outputPathPattern;
+        List<String> args = chunk.getCommandArgs();
+        if (!hasExplicitOutputPath && args != null) {
+            for (int i = 0; i < args.size(); i++) {
+                String arg = args.get(i);
+                if (arg == null) continue;
+                if (arg.equals("-o") || arg.equals("--output") || arg.equals("--output-file")) {
+                    if (i + 1 < args.size() && args.get(i + 1) != null) {
+                        outputPath = args.get(i + 1);
+                    }
+                } else if (arg.startsWith("--output=")) {
+                    outputPath = arg.substring("--output=".length());
+                } else if (arg.startsWith("--output-file=")) {
+                    outputPath = arg.substring("--output-file=".length());
+                }
+            }
+        }
+        return new File(resolveFramePattern(substitute(outputPath, chunk, frame, new File("")), frame));
+    }
+
+    private boolean ensureParentDirectory(File imageFile) {
         try {
-            // TODO - Make the output path configurable or parse it from the chunk's command/args
-            File imageFile = new File("/tmp/render_output_" + frame + ".png"); // Default blender output
+            File parent = imageFile.getParentFile();
+            if (parent != null) {
+                Files.createDirectories(parent.toPath());
+            }
+            return true;
+        } catch (IOException e) {
+            System.err.println("Failed to create output directory for " + imageFile.getAbsolutePath());
+            return false;
+        }
+    }
+
+    private String resolveFramePattern(String path, int frame) {
+        int hashStart = path.indexOf('#');
+        if (hashStart < 0) return path;
+
+        int hashEnd = hashStart;
+        while (hashEnd < path.length() && path.charAt(hashEnd) == '#') {
+            hashEnd++;
+        }
+        String paddedFrame = String.format("%0" + (hashEnd - hashStart) + "d", frame);
+        return path.substring(0, hashStart) + paddedFrame + path.substring(hashEnd);
+    }
+
+    private boolean uploadFrame(Long jobId, int frame, File imageFile) {
+        try {
             MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
             body.add("file", new FileSystemResource(imageFile));
 
@@ -143,8 +253,13 @@ public class WorkerNode  implements org.springframework.boot.CommandLineRunner {
                                        new HttpEntity<>(body, headers), String.class);
             
             System.out.println("Uploaded frame " + frame);
+            if (!imageFile.delete() && imageFile.exists()) {
+                System.err.println("Uploaded frame " + frame + " but failed to delete local file " + imageFile.getAbsolutePath());
+            }
+            return true;
         } catch (Exception e) {
             System.err.println("Failed to upload frame " + frame);
+            return false;
         }
     }
 

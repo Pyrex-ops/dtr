@@ -22,9 +22,9 @@ public class CoordinatorService {
     private static final int FRAMES_PER_CHUNK = 10;
 
     @Transactional
-    public Long submitJob(String blendFilePath, int totalFrames, String command, List<String> args) {
+    public Long submitJob(String inputFilePath, int totalFrames, String command, List<String> args, String outputPath) {
         RenderJob job = new RenderJob();
-        job.setBlendFilePath(blendFilePath);
+        job.setInputFilePath(inputFilePath);
         job.setTotalFrames(totalFrames);
         job.setStatus("PENDING");
         job = jobRepository.save(job);
@@ -34,11 +34,11 @@ public class CoordinatorService {
             
             RenderChunk chunk = new RenderChunk();
             chunk.setJobId(job.getId());
-            chunk.setBlendFilePath(blendFilePath);
+            chunk.setInputFilePath(inputFilePath);
             chunk.setStartFrame(i);
             chunk.setEndFrame(endFrame);
-            // propagate optional command/args from job submission
             chunk.setCommand(command);
+            chunk.setOutputPath(outputPath);
             if (args != null) {
                 chunk.setCommandArgs(args);
             }
@@ -50,27 +50,66 @@ public class CoordinatorService {
 
     @Transactional
     public RenderChunk getNextAvailableChunk(String nodeName) {
-        RenderChunk chunk = chunkRepository.findFirstByStatusOrderByJobIdAsc(ChunkStatus.PENDING);
-        
-        if (chunk != null) {
+        List<RenderChunk> pendingChunks = chunkRepository.findByStatusOrderByJobIdAscStartFrameAsc(ChunkStatus.PENDING);
+
+        for (RenderChunk chunk : pendingChunks) {
+            RenderJob job = jobRepository.findById(chunk.getJobId()).orElse(null);
+            if (job == null || !canAssign(job.getStatus())) {
+                continue;
+            }
+
+            if ("PENDING".equals(job.getStatus())) {
+                job.setStatus("IN_PROGRESS");
+                jobRepository.save(job);
+            }
+
             chunk.setStatus(ChunkStatus.IN_PROGRESS);
             chunk.setAssignedNode(nodeName);
             chunk.setLastHeartbeat(LocalDateTime.now());
-            chunkRepository.save(chunk);
+            return chunkRepository.save(chunk);
         }
-        return chunk;
+
+        return null;
     }
 
     @Transactional
-    public void reportChunkStatus(Long chunkId, ChunkStatus status) {
+    public RenderChunk reportChunkStatus(Long chunkId, ChunkStatus status) {
         RenderChunk chunk = chunkRepository.findById(chunkId).orElseThrow();
-        chunk.setStatus(status);
-        
-        if (status == ChunkStatus.FAILED) {
+
+        if (status == ChunkStatus.COMPLETED) {
+            chunk.setStatus(ChunkStatus.COMPLETED);
+            chunk.setLastHeartbeat(null);
+        } else if (status == ChunkStatus.FAILED || status == ChunkStatus.PENDING) {
             chunk.setStatus(ChunkStatus.PENDING);
             chunk.setAssignedNode(null);
+            chunk.setLastHeartbeat(null);
+        } else {
+            chunk.setStatus(status);
         }
-        chunkRepository.save(chunk);
+        RenderChunk savedChunk = chunkRepository.save(chunk);
+
+        if (savedChunk.getStatus() == ChunkStatus.COMPLETED) {
+            completeJobIfAllChunksFinished(savedChunk.getJobId());
+        }
+
+        return savedChunk;
+    }
+
+    private boolean canAssign(String status) {
+        return "PENDING".equals(status) || "IN_PROGRESS".equals(status);
+    }
+
+    private void completeJobIfAllChunksFinished(Long jobId) {
+        boolean hasUnfinishedChunks = chunkRepository.existsByJobIdAndStatusNot(jobId, ChunkStatus.COMPLETED);
+        if (hasUnfinishedChunks) {
+            return;
+        }
+
+        RenderJob job = jobRepository.findById(jobId).orElse(null);
+        if (job != null) {
+            job.setStatus("COMPLETED");
+            jobRepository.save(job);
+        }
     }
 
     @Scheduled(fixedRate = 60000) // Runs every minute

@@ -9,5 +9,9 @@ import com.dtr.commonlib.ChunkStatus;
 
 public interface ChunkRepository extends JpaRepository<RenderChunk, Long> {
     RenderChunk findFirstByStatusOrderByJobIdAsc(ChunkStatus status);
+    List<RenderChunk> findByStatusOrderByJobIdAscStartFrameAsc(ChunkStatus status);
+    List<RenderChunk> findByJobIdOrderByStartFrameAsc(Long jobId);
+    boolean existsByJobIdAndStatusNot(Long jobId, ChunkStatus status);
+    void deleteByJobId(Long jobId);
     List<RenderChunk> findByStatusAndLastHeartbeatBefore(ChunkStatus status, LocalDateTime before);
 }
